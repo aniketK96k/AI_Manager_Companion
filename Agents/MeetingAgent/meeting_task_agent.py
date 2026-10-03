@@ -49,6 +49,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from dotenv import load_dotenv
+from GoogleMeet import get_last_30_days_meetings
 load_dotenv()
 __all__ = [
     "State",
@@ -60,14 +61,16 @@ __all__ = [
     "make_initial_state",
 ]
 
-
+tools = [
+    get_last_30_days_meetings
+]
 llm = ChatGoogleGenerativeAI(
     model="gemini-3.1-flash-lite",
     temperature=0,
     max_output_tokens=1024,
     google_api_key=os.getenv("GOOGLE_API_KEY"),
 )
-
+llm_with_tools = llm.bind_tools(tools)
 
 # ============================================================
 # SCHEMA
@@ -172,7 +175,7 @@ Rules:
 
 
 def _extractor(state: State) -> Dict[str, Any]:
-    structured_llm = llm.with_structured_output(ExtractionOutput)
+    structured_llm = llm_with_tools.with_structured_output(ExtractionOutput)
 
     result = structured_llm.invoke(
         [

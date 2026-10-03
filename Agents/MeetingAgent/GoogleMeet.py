@@ -6,6 +6,8 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
+from langchain_core.tools import tool
+
 
 SCOPES = [
     "https://www.googleapis.com/auth/calendar.readonly"
@@ -33,9 +35,7 @@ def authenticate():
                 SCOPES
             )
 
-            credentials = flow.run_local_server(
-                port=0
-            )
+            credentials = flow.run_local_server(port=0)
 
         with open("token.json", "w") as token:
             token.write(credentials.to_json())
@@ -43,7 +43,15 @@ def authenticate():
     return credentials
 
 
-def get_last_30_days():
+@tool
+def get_last_30_days_meetings() -> list[dict]:
+    """
+    Get all meetings from the user's primary Google Calendar
+    during the last 30 days.
+
+    Returns the meeting name, start time, end time,
+    Google Meet link, description, and location.
+    """
 
     credentials = authenticate()
 
@@ -72,62 +80,41 @@ def get_last_30_days():
             pageToken=page_token
         ).execute()
 
-        events.extend(
-            response.get("items", [])
-        )
+        events.extend(response.get("items", []))
 
-        page_token = response.get(
-            "nextPageToken"
-        )
+        page_token = response.get("nextPageToken")
 
         if not page_token:
             break
 
-    return events
-
-
-def main():
-
-    events = get_last_30_days()
-
-    print(
-        f"\nFound {len(events)} calendar events\n"
-    )
+    meetings = []
 
     for event in events:
 
-        name = event.get(
-            "summary",
-            "No title"
-        )
+        start_data = event.get("start", {})
+        end_data = event.get("end", {})
 
-        start = event.get(
-            "start",
-            {}
-        ).get(
+        start = start_data.get(
             "dateTime",
-            event.get("start", {}).get("date")
+            start_data.get("date")
         )
 
-        end = event.get(
-            "end",
-            {}
-        ).get(
+        end = end_data.get(
             "dateTime",
-            event.get("end", {}).get("date")
+            end_data.get("date")
         )
 
-        meet_link = event.get(
-            "hangoutLink"
-        )
+        meetings.append({
+            "id": event.get("id"),
+            "name": event.get(
+                "summary",
+                "No title"
+            ),
+            "start": start,
+            "end": end,
+            "meet_link": event.get("hangoutLink"),
+            "description": event.get("description"),
+            "location": event.get("location")
+        })
 
-        print("=" * 70)
-
-        print("Meeting:", name)
-        print("Start:", start)
-        print("End:", end)
-        print("Google Meet:", meet_link)
-
-
-if __name__ == "__main__":
-    main()
+    return meetings

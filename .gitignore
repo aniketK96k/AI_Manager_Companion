@@ -2,5 +2,11 @@ myenv/
 venv/
 .venv/
 
-.envAgents/MeetingAgent/credentials.json
+.env
+
+Agents/MeetingAgent/credentials.json
 Agents/MeetingAgent/token.json
+
+Agents/CommunicationAgent/client_secret.json
+Agents/CommunicationAgent/credentials.json
+Agents/CommunicationAgent/token.json
