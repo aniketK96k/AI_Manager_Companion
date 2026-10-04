@@ -9,18 +9,20 @@ Architecture:
 Agents:
     - project_agent       : stub Jira/Linear tools (swap for real ones later)
     - communication_agent : REAL Gmail tools loaded from the Gmail MCP server
-    - meeting_agent       : Phase 1 meeting_task_agent subgraph
+    - meeting_agent       : meetings. Lists the last 30 days of Google Meet /
+                            Calendar meetings; if a transcript is given, runs
+                            the meeting_task_agent subgraph (transcript ->
+                            tickets, with a human-approval interrupt)
 
-Because MCP tools are async-only and tied to an open MCP session, the graph
-is built AFTER the Gmail session is opened (see main()) and must be run with
-`await app.ainvoke(...)`, not `app.invoke(...)`.
+The graph must be built AFTER the Gmail MCP session is opened and run with
+`await app.ainvoke(...)` / `app.astream(...)`. It must be compiled with a
+checkpointer (needed for the meeting agent's approval interrupt).
 """
 
 import asyncio
 import os
 from typing import TypedDict, List, Annotated, Dict, Any, Literal, Optional
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import Command
+
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
@@ -28,6 +30,8 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages, REMOVE_ALL_MESSAGES
 from langgraph.prebuilt import ToolNode
 from langgraph.errors import GraphRecursionError
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command
 from langchain_core.tools import tool
 from langchain_core.messages import (
     BaseMessage,
@@ -53,7 +57,7 @@ load_dotenv()
 llm = ChatGoogleGenerativeAI(
     model="gemini-3.1-flash-lite",
     temperature=0,
-    max_output_tokens=1024,
+    max_output_tokens=4096,
     google_api_key=os.getenv("GOOGLE_API_KEY"),
 )
 
@@ -114,13 +118,20 @@ assign each to the right agent:
 1. project_agent — Jira, Linear, project status, tasks, blockers
 2. communication_agent — Gmail: searching, reading, summarizing and
    drafting emails (it has no Slack access)
-3. meeting_agent — analyzing a meeting transcript into action items,
-   decisions and blockers, and filing tickets for them
+3. meeting_agent — everything about meetings: listing the user's Google
+   Meet / Calendar meetings (e.g. the last 30 days) and, only if the user
+   supplied a transcript, extracting action items, decisions and blockers
+   and filing tickets. A transcript is OPTIONAL — never plan a task to
+   "retrieve" or "obtain" a transcript.
 
 Rules:
 - Use task IDs task_1, task_2, ...
 - Fill depends_on with the IDs of tasks that must finish first.
-- Prefer the fewest tasks that fully satisfy the request.
+- Create exactly one task per thing the user asked for, and nothing more.
+  Never add extra search, read, verify, summarize or notify tasks.
+  Example: "send an email to X" is ONE communication_agent task.
+  Example: "what are my meetings in the last 30 days" is ONE meeting_agent task.
+- If the user says which agent to use or avoid, obey that.
 - Do not invent work the user didn't ask for.
 """
 
@@ -198,6 +209,10 @@ task_5, continuing from where the plan left off). Depends_on may
 reference already-completed task IDs too.
 
 Agents available: project_agent, communication_agent, meeting_agent.
+
+Only plan work needed to recover from the problem and finish the ORIGINAL
+request. Never add new work the user did not ask for. If the request is
+already satisfied or cannot be fixed, return an empty list.
 """
 
 
@@ -254,7 +269,7 @@ project_tool_node = ToolNode(project_tools, messages_key="task_messages")
 
 
 # ============================================================
-# AGENT FACTORY (used for project_agent and communication_agent)
+# AGENT FACTORY (project_agent, communication_agent)
 # ============================================================
 
 MAX_TOOL_ROUNDS = 6  # loop guard: Gmail tasks often need search -> read -> read
@@ -357,7 +372,7 @@ project_agent, project_agent_decision, project_complete = _make_agent(
 
 
 # ============================================================
-# SPECIALIST AGENT: meeting_agent (backed by the Phase 1 subgraph)
+# SPECIALIST AGENT: meeting_agent (backed by the meeting_task_agent subgraph)
 # ============================================================
 
 meeting_agent_instance = MeetingAgent()
@@ -471,7 +486,7 @@ def build_graph(comm_tools: list) -> StateGraph:
 
 
 # ============================================================
-# RUN
+# RUN (command-line alternative to the Streamlit UI)
 # ============================================================
 
 async def main():
@@ -505,6 +520,7 @@ async def main():
         "pending_approvals": {},
     }
     config = {"configurable": {"thread_id": "manager-run-1"}, "recursion_limit": 50}
+
     # The Gmail MCP session must stay open for the entire graph run.
     async with gmail_tools() as comm_tools:
         app = build_graph(comm_tools).compile(checkpointer=MemorySaver())
@@ -514,10 +530,10 @@ async def main():
         except GraphRecursionError:
             print(
                 "Graph hit its recursion limit (50 steps) without finishing — "
-                "something is still looping. Check task_messages for the task "
-                "that was active when this happened."
+                "something is still looping."
             )
             raise
+
         while True:
             snapshot = await app.aget_state(config)
             interrupts = [i for t in snapshot.tasks for i in t.interrupts]
@@ -529,28 +545,14 @@ async def main():
             for item in payload["action_items"]:
                 print(f"  {item['id']}: {item['task']} (owner={item['owner']}, deadline={item['deadline']})")
 
-            # Replace this with your real UI / input. Here: approve everything.
+            # Replace with real input. Here: approve everything.
             approved_ids = [item["id"] for item in payload["action_items"]]
-            edits = {}  # e.g. {"task_1": {"owner": "Aniket"}}
-
             result = await app.ainvoke(
-                Command(resume={"approved_ids": approved_ids, "edits": edits}),
+                Command(resume={"approved_ids": approved_ids, "edits": {}}),
                 config,
             )
 
     print(result["final_response"])
-
-    # If the meeting task paused for approval, resume it independently,
-    # whenever a human has reviewed it:
-    pending = result.get("pending_approvals") or {}
-    for task_id, payload in pending.items():
-        print(f"\n--- pending approval for {task_id} ---")
-        for item in payload["action_items"]:
-            print(f"  {item['id']}: {item['task']} (owner={item['owner']})")
-
-        approved_ids = [item["id"] for item in payload["action_items"]]
-        resume_result = meeting_agent_instance.resume_approval(task_id, approved_ids)
-        print(resume_result["final_response"])
 
 
 if __name__ == "__main__":

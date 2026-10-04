@@ -2,37 +2,30 @@
 meeting_task_agent.py
 ======================
 
-Phase 1: Meeting -> Task Tracking Agent, packaged for import.
+Meeting -> Task Tracking Agent, packaged for import.
 
-Usage from your main code:
+Standalone usage (needs a checkpointer because of the approval interrupt):
 
     from meeting_task_agent import build_meeting_task_agent, make_initial_state
+    from langgraph.checkpoint.memory import MemorySaver
     from langgraph.types import Command
 
-    app = build_meeting_task_agent()
+    app = build_meeting_task_agent(checkpointer=MemorySaver())
     config = {"configurable": {"thread_id": "meeting-001"}}
 
-    state = make_initial_state(
-        meeting_title="Architecture Review",
-        meeting_date="2026-09-10",
-        transcript=my_transcript_text,
-    )
-
-    result = app.invoke(state, config)
+    result = app.invoke(make_initial_state("Title", "2026-09-10", text), config)
     if "__interrupt__" in result:
         pending = result["__interrupt__"][0].value
-        # ... show pending["action_items"] to a human, collect their choices ...
         result = app.invoke(
-            Command(resume={"approved_ids": [...], "edits": {...}}),
-            config,
+            Command(resume={"approved_ids": [...], "edits": {...}}), config
         )
-
     print(result["final_response"])
 
-Nothing in this file runs on import — build_meeting_task_agent() only
-compiles the graph when you call it, so you can safely import this module
-from a larger app (e.g. the LangGraph router in your Manager AI system)
-without triggering any LLM calls or side effects at import time.
+Inside the Manager AI graph, leave checkpointer=None: the subgraph then
+inherits the outer graph's checkpointer, which is what lets the approval
+interrupt pause the outer graph and resume correctly.
+
+Nothing runs on import except creating the LLM client.
 """
 
 from typing import TypedDict, List, Annotated, Dict, Any, Literal, Optional
@@ -44,13 +37,13 @@ from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.types import interrupt
-from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from dotenv import load_dotenv
-from Agents.MeetingAgent.GoogleMeet import get_last_30_days_meetings
+
 load_dotenv()
+
 __all__ = [
     "State",
     "ActionItem",
@@ -61,16 +54,12 @@ __all__ = [
     "make_initial_state",
 ]
 
-tools = [
-    get_last_30_days_meetings
-]
 llm = ChatGoogleGenerativeAI(
     model="gemini-3.1-flash-lite",
     temperature=0,
-    max_output_tokens=1024,
+    max_output_tokens=4096,
     google_api_key=os.getenv("GOOGLE_API_KEY"),
 )
-llm_with_tools = llm.bind_tools(tools)
 
 # ============================================================
 # SCHEMA
@@ -126,8 +115,7 @@ class State(TypedDict):
 
 
 def make_initial_state(meeting_title: str, meeting_date: str, transcript: str) -> State:
-    """Convenience constructor for the initial state your main code passes
-    into app.invoke(...)."""
+    """Convenience constructor for the initial state passed to invoke(...)."""
     return {
         "messages": [],
         "meeting_title": meeting_title,
@@ -148,7 +136,7 @@ def make_initial_state(meeting_title: str, meeting_date: str, transcript: str) -
 
 EXTRACTION_SYSTEM_PROMPT = """
 You are a meeting analysis agent. You will be given a raw transcript of a
-Microsoft Teams meeting.
+meeting.
 
 Extract three things, and ONLY things that were actually said:
 
@@ -175,7 +163,8 @@ Rules:
 
 
 def _extractor(state: State) -> Dict[str, Any]:
-    structured_llm = llm_with_tools.with_structured_output(ExtractionOutput)
+    # Plain model: no tools bound, so structured output works reliably.
+    structured_llm = llm.with_structured_output(ExtractionOutput)
 
     result = structured_llm.invoke(
         [
@@ -209,16 +198,16 @@ def _extractor(state: State) -> Dict[str, Any]:
 
 def _human_approval(state: State) -> Dict[str, Any]:
     """Pauses for a human to review/edit/accept the extracted action items
-    before anything gets written to Jira/ADO. Your main code resumes with:
+    before anything gets written to Jira/ADO. Resume with:
 
-        app.invoke(
-            Command(resume={"approved_ids": [...], "edits": {...}}),
-            config,
-        )
+        Command(resume={"approved_ids": [...], "edits": {...}})
 
-    - approved_ids: list of task ids the human wants ticketed as-is
-    - edits: optional dict of {task_id: {field: new_value}} overrides
-      applied before ticket creation (e.g. fixing a misheard owner name)
+    - approved_ids: task ids the human wants ticketed
+    - edits: optional {task_id: {field: new_value}} overrides applied
+      before ticket creation (e.g. fixing a misheard owner name)
+
+    Keep this node free of side effects before interrupt(): it re-runs
+    from the top when the graph resumes.
     """
     decision = interrupt(
         {
@@ -299,12 +288,12 @@ def _final_agent(state: State) -> Dict[str, Any]:
 # ============================================================
 
 def build_meeting_task_agent(checkpointer=None):
-    """Compiles and returns the Phase 1 graph, ready to .invoke().
+    """Compiles and returns the graph.
 
-    Pass your own `checkpointer` (e.g. a Postgres/SQLite saver) if this is
-    running inside a larger app that needs interrupts to survive process
-    restarts. Defaults to an in-memory checkpointer, which is fine for a
-    single running process but won't persist across restarts.
+    checkpointer=None (default): the graph inherits the parent graph's
+    checkpointer when used as a subgraph (what the Manager AI does).
+    For standalone use, pass MemorySaver() or a persistent saver — the
+    approval interrupt cannot work without one.
     """
     graph = StateGraph(State)
 
