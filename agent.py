@@ -19,7 +19,8 @@ is built AFTER the Gmail session is opened (see main()) and must be run with
 import asyncio
 import os
 from typing import TypedDict, List, Annotated, Dict, Any, Literal, Optional
-
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
@@ -37,7 +38,7 @@ from langchain_core.messages import (
 )
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from Agents.CommunicationAgent.communication_tools import (
+from Agents.CommunicationAgent.Communicationtools import (
     gmail_tools,
     COMMUNICATION_SYSTEM_PROMPT,
 )
@@ -503,13 +504,13 @@ async def main():
         "meeting_date": "2026-09-10",
         "pending_approvals": {},
     }
-
+    config = {"configurable": {"thread_id": "manager-run-1"}, "recursion_limit": 50}
     # The Gmail MCP session must stay open for the entire graph run.
     async with gmail_tools() as comm_tools:
-        app = build_graph(comm_tools).compile()
+        app = build_graph(comm_tools).compile(checkpointer=MemorySaver())
 
         try:
-            result = await app.ainvoke(initial_state, config={"recursion_limit": 50})
+            result = await app.ainvoke(initial_state, config)
         except GraphRecursionError:
             print(
                 "Graph hit its recursion limit (50 steps) without finishing — "
@@ -517,6 +518,25 @@ async def main():
                 "that was active when this happened."
             )
             raise
+        while True:
+            snapshot = await app.aget_state(config)
+            interrupts = [i for t in snapshot.tasks for i in t.interrupts]
+            if not interrupts:
+                break
+
+            payload = interrupts[0].value
+            print("\n--- APPROVAL REQUIRED ---")
+            for item in payload["action_items"]:
+                print(f"  {item['id']}: {item['task']} (owner={item['owner']}, deadline={item['deadline']})")
+
+            # Replace this with your real UI / input. Here: approve everything.
+            approved_ids = [item["id"] for item in payload["action_items"]]
+            edits = {}  # e.g. {"task_1": {"owner": "Aniket"}}
+
+            result = await app.ainvoke(
+                Command(resume={"approved_ids": approved_ids, "edits": edits}),
+                config,
+            )
 
     print(result["final_response"])
 

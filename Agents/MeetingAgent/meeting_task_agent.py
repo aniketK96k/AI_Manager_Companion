@@ -49,7 +49,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from dotenv import load_dotenv
-from GoogleMeet import get_last_30_days_meetings
+from Agents.MeetingAgent.GoogleMeet import get_last_30_days_meetings
 load_dotenv()
 __all__ = [
     "State",
@@ -319,4 +319,4 @@ def build_meeting_task_agent(checkpointer=None):
     graph.add_edge("create_tickets", "final_agent")
     graph.add_edge("final_agent", END)
 
-    return graph.compile(checkpointer=checkpointer or MemorySaver())
+    return graph.compile(checkpointer=checkpointer)

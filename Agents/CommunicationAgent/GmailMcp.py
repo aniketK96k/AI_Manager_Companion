@@ -16,8 +16,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.compose",
 ]  # delete token.json after changing this list
 
-CLIENT_SECRET_FILE = "client_secret.json"
-TOKEN_FILE = "token.json"  # cached login so the browser doesn't open every run
+CLIENT_SECRET_FILE = "Agents/CommunicationAgent/client_secret.json"
+TOKEN_FILE = "Agents/CommunicationAgent/token.json"  # cached login so the browser doesn't open every run
 
 
 def get_access_token() -> str:
@@ -50,7 +50,7 @@ async def gmail_session():
         follow_redirects=True,
     )
     async with http_client:
-        async with streamable_http_client(MCP_URL, http_client=http_client) as (read, write):
+        async with streamable_http_client(MCP_URL, http_client=http_client) as (read, write, _):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 yield session
